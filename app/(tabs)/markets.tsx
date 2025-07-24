@@ -1,284 +1,412 @@
-import React, { useState, useEffect } from 'react'
-import { View, Text, ScrollView, TouchableOpacity, TextInput, Alert } from 'react-native'
-import { Search, TrendingUp, TrendingDown, Eye, EyeOff, ShoppingCart, DollarSign } from 'lucide-react-native'
-import { marketDataService, MarketDataPoint, SECTORS } from '@/src/services/marketData'
-import blink from '@/src/blink/client'
+import React, { useState, useEffect } from 'react';
+import { View, Text, ScrollView, TouchableOpacity, TextInput, Alert, Modal } from 'react-native';
+import { marketDataService, MarketData, OptionChainData } from '../../src/services/marketDataService';
+import { tradingService } from '../../src/services/tradingService';
+import { supabase } from '../../src/lib/supabase';
+import FundamentalStatsViewer from '../../components/FundamentalStatsViewer';
+import AdvancedChart from '../../components/AdvancedChart';
 
-const sectorTabs = ['All', 'Nifty50', 'BankNifty', 'Auto', 'Pharma', 'FMCG', 'IT']
+const sectors = ['All', 'INDEX', 'Nifty50', 'BankNifty', 'Auto', 'Pharma', 'FMCG', 'IT'];
 
 export default function MarketsScreen() {
-  const [selectedSector, setSelectedSector] = useState('All')
-  const [searchQuery, setSearchQuery] = useState('')
-  const [stocks, setStocks] = useState<MarketDataPoint[]>([])
-  const [indices, setIndices] = useState<MarketDataPoint[]>([])
-  const [filteredStocks, setFilteredStocks] = useState<MarketDataPoint[]>([])
-  const [watchlist, setWatchlist] = useState<string[]>([])
-  const [user, setUser] = useState<any>(null)
-  const [marketOpen, setMarketOpen] = useState(false)
+  const [selectedSector, setSelectedSector] = useState('All');
+  const [marketData, setMarketData] = useState<MarketData[]>([]);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [isMarketOpen, setIsMarketOpen] = useState(false);
+  const [selectedStock, setSelectedStock] = useState<MarketData | null>(null);
+  const [showChart, setShowChart] = useState(false);
+  const [showOptionChain, setShowOptionChain] = useState(false);
+  const [optionChainData, setOptionChainData] = useState<OptionChainData[]>([]);
+  const [showTradeModal, setShowTradeModal] = useState(false);
+  const [tradeType, setTradeType] = useState<'BUY' | 'SELL'>('BUY');
+  const [tradeQuantity, setTradeQuantity] = useState('1');
+  const [user, setUser] = useState<any>(null);
+  const [userBalance, setUserBalance] = useState(0);
 
   useEffect(() => {
-    loadInitialData()
-    
-    // Subscribe to real-time updates
-    const unsubscribe = marketDataService.subscribe((data) => {
-      const stockData = data.filter(item => item.sector !== 'Index')
-      const indexData = data.filter(item => item.sector === 'Index')
-      setStocks(stockData)
-      setIndices(indexData)
-    })
-
-    // Check market status
-    setMarketOpen(marketDataService.isMarketOpen())
-    const marketInterval = setInterval(() => {
-      setMarketOpen(marketDataService.isMarketOpen())
-    }, 60000)
-
-    return () => {
-      unsubscribe()
-      clearInterval(marketInterval)
-    }
-  }, [])
+    loadUser();
+    checkMarketStatus();
+    const interval = setInterval(checkMarketStatus, 60000); // Check every minute
+    return () => clearInterval(interval);
+  }, []);
 
   useEffect(() => {
-    filterStocks()
-  }, [selectedSector, searchQuery, stocks])
+    const unsubscribe = marketDataService.subscribe(selectedSector, (data) => {
+      setMarketData(data);
+    });
 
-  const loadInitialData = async () => {
+    return unsubscribe;
+  }, [selectedSector]);
+
+  const loadUser = async () => {
     try {
-      const userData = await blink.auth.me()
-      setUser(userData)
-
-      // Mock watchlist
-      setWatchlist(['RELIANCE', 'TCS', 'HDFCBANK'])
+      const { data: { user: authUser } } = await supabase.auth.getUser();
+      if (authUser) {
+        const { data: userData } = await supabase
+          .from('users')
+          .select('*')
+          .eq('id', authUser.id)
+          .single();
+        
+        setUser(userData);
+        setUserBalance(userData?.virtual_balance || 0);
+      }
     } catch (error) {
-      console.error('Error loading initial data:', error)
+      console.error('Error loading user:', error);
     }
-  }
+  };
 
-  const filterStocks = () => {
-    let filtered = stocks
+  const checkMarketStatus = () => {
+    setIsMarketOpen(marketDataService.isMarketOpen());
+  };
 
-    // Filter by sector
-    if (selectedSector !== 'All') {
-      filtered = marketDataService.getStocksBySector(selectedSector)
-    }
+  const filteredData = marketData.filter(stock =>
+    stock.symbol.toLowerCase().includes(searchQuery.toLowerCase()) ||
+    stock.name.toLowerCase().includes(searchQuery.toLowerCase())
+  );
 
-    // Filter by search query
-    if (searchQuery) {
-      filtered = filtered.filter(stock =>
-        stock.symbol.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        stock.sector.toLowerCase().includes(searchQuery.toLowerCase())
-      )
-    }
+  const handleStockPress = (stock: MarketData) => {
+    setSelectedStock(stock);
+  };
 
-    setFilteredStocks(filtered)
-  }
+  const handleShowChart = (stock: MarketData) => {
+    setSelectedStock(stock);
+    setShowChart(true);
+  };
 
-  const toggleWatchlist = (symbol: string) => {
-    if (watchlist.includes(symbol)) {
-      setWatchlist(prev => prev.filter(s => s !== symbol))
-      Alert.alert('Removed', `${symbol} removed from watchlist`)
-    } else {
-      setWatchlist(prev => [...prev, symbol])
-      Alert.alert('Added', `${symbol} added to watchlist`)
-    }
-  }
+  const handleShowOptionChain = (stock: MarketData) => {
+    setSelectedStock(stock);
+    const optionData = marketDataService.getOptionChain(stock.symbol);
+    setOptionChainData(optionData);
+    setShowOptionChain(true);
+  };
 
-  const executeTrade = (symbol: string, type: 'BUY' | 'SELL', price: number) => {
-    if (!marketOpen) {
-      Alert.alert('Market Closed', 'Trading is only allowed during market hours (9:15 AM - 3:30 PM)')
-      return
+  const handleTrade = (stock: MarketData, type: 'BUY' | 'SELL') => {
+    if (!isMarketOpen) {
+      Alert.alert('Market Closed', 'Trading is not allowed outside market hours (9:15 AM - 3:30 PM)');
+      return;
     }
 
-    Alert.alert(
-      `${type} ${symbol}`,
-      `Execute ${type} order at ₹${price.toFixed(2)}?`,
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Confirm',
-          onPress: () => {
-            Alert.alert('Trade Executed', `${type} 1 ${symbol} at ₹${price.toFixed(2)}`)
-          }
-        }
-      ]
-    )
-  }
+    setSelectedStock(stock);
+    setTradeType(type);
+    setShowTradeModal(true);
+  };
 
-  const renderStockItem = (stock: MarketDataPoint) => {
-    const isInWatchlist = watchlist.includes(stock.symbol)
-    const changeColor = stock.change >= 0 ? 'text-green-600' : 'text-red-600'
-    const changeBgColor = stock.change >= 0 ? 'bg-green-50' : 'bg-red-50'
+  const executeTrade = async () => {
+    if (!selectedStock || !user) return;
 
-    return (
-      <View key={stock.symbol} className="bg-white rounded-xl p-4 mb-3 shadow-sm">
-        <View className="flex-row justify-between items-start mb-3">
-          <TouchableOpacity className="flex-1">
-            <View className="flex-row items-center mb-1">
-              <Text className="text-lg font-bold text-gray-900">{stock.symbol}</Text>
-              <View className="ml-2 px-2 py-1 bg-blue-100 rounded">
-                <Text className="text-xs text-blue-600 font-medium">{stock.sector}</Text>
-              </View>
-            </View>
-            
-            <View className="flex-row items-center">
-              <Text className="text-2xl font-bold text-gray-900">₹{stock.price.toFixed(2)}</Text>
-              <View className={`ml-3 px-2 py-1 rounded ${changeBgColor}`}>
-                <Text className={`text-sm font-medium ${changeColor}`}>
-                  {stock.change >= 0 ? '+' : ''}₹{stock.change.toFixed(2)} ({stock.changePercent.toFixed(2)}%)
-                </Text>
-              </View>
-            </View>
-          </TouchableOpacity>
+    const quantity = parseInt(tradeQuantity);
+    if (isNaN(quantity) || quantity <= 0) {
+      Alert.alert('Invalid Quantity', 'Please enter a valid quantity');
+      return;
+    }
 
-          <TouchableOpacity
-            onPress={() => toggleWatchlist(stock.symbol)}
-            className="p-2"
-          >
-            {isInWatchlist ? (
-              <Eye size={24} color="#3b82f6" />
-            ) : (
-              <EyeOff size={24} color="#9ca3af" />
-            )}
-          </TouchableOpacity>
-        </View>
+    try {
+      const settings = await tradingService.getUserSettings(user.id);
+      const result = await tradingService.executeTrade({
+        symbol: selectedStock.symbol,
+        type: tradeType,
+        quantity,
+        price: selectedStock.price,
+        userId: user.id
+      }, settings.brokerageSimulation);
 
-        {/* Quick Stats */}
-        <View className="flex-row justify-between mb-3 py-2 border-t border-gray-100">
-          <View className="flex-1">
-            <Text className="text-xs text-gray-500">Volume</Text>
-            <Text className="text-sm font-medium text-gray-900">
-              {stock.volume.toLocaleString()}
-            </Text>
-          </View>
-          <View className="flex-1">
-            <Text className="text-xs text-gray-500">Market Cap</Text>
-            <Text className="text-sm font-medium text-gray-900">
-              {stock.marketCap ? `₹${(stock.marketCap / 1e9).toFixed(1)}B` : 'N/A'}
-            </Text>
-          </View>
-          <View className="flex-1">
-            <Text className="text-xs text-gray-500">P/E</Text>
-            <Text className="text-sm font-medium text-gray-900">
-              {stock.peRatio?.toFixed(1) || 'N/A'}
-            </Text>
-          </View>
-        </View>
+      if (result.success) {
+        Alert.alert('Trade Executed', result.message);
+        setUserBalance(result.newBalance || userBalance);
+        setShowTradeModal(false);
+        setTradeQuantity('1');
+      } else {
+        Alert.alert('Trade Failed', result.message);
+      }
+    } catch (error) {
+      Alert.alert('Error', 'Failed to execute trade');
+    }
+  };
 
-        {/* Action Buttons */}
-        <View className="flex-row space-x-2">
-          <TouchableOpacity
-            onPress={() => executeTrade(stock.symbol, 'BUY', stock.price)}
-            className="flex-1 bg-green-500 rounded-lg py-3 flex-row items-center justify-center"
-            disabled={!marketOpen}
-          >
-            <ShoppingCart size={16} color="white" />
-            <Text className="text-white font-bold ml-2">BUY</Text>
-          </TouchableOpacity>
+  const addToWatchlist = async (symbol: string) => {
+    if (!user) return;
 
-          <TouchableOpacity
-            onPress={() => executeTrade(stock.symbol, 'SELL', stock.price)}
-            className="flex-1 bg-red-500 rounded-lg py-3 flex-row items-center justify-center"
-            disabled={!marketOpen}
-          >
-            <DollarSign size={16} color="white" />
-            <Text className="text-white font-bold ml-2">SELL</Text>
-          </TouchableOpacity>
-        </View>
-      </View>
-    )
-  }
+    try {
+      const { error } = await supabase
+        .from('watchlist')
+        .insert({
+          user_id: user.id,
+          symbol
+        });
+
+      if (error && error.code !== '23505') { // Ignore duplicate key error
+        throw error;
+      }
+
+      Alert.alert('Success', 'Added to watchlist');
+    } catch (error) {
+      Alert.alert('Error', 'Failed to add to watchlist');
+    }
+  };
+
+  const getChangeColor = (change: number) => {
+    if (change > 0) return 'text-green-500';
+    if (change < 0) return 'text-red-500';
+    return 'text-gray-400';
+  };
 
   return (
-    <View className="flex-1 bg-gray-50">
+    <View className="flex-1 bg-gray-900">
       {/* Header */}
-      <View className="bg-white px-4 pt-12 pb-4 border-b border-gray-200">
-        <View className="flex-row justify-between items-center mb-4">
-          <Text className="text-2xl font-bold text-gray-900">Markets</Text>
-          <View className={`px-3 py-1 rounded-full ${marketOpen ? 'bg-green-100' : 'bg-red-100'}`}>
-            <Text className={`text-sm font-medium ${marketOpen ? 'text-green-600' : 'text-red-600'}`}>
-              {marketOpen ? '● Market Open' : '● Market Closed'}
+      <View className="p-4 border-b border-gray-700">
+        <View className="flex-row items-center justify-between mb-4">
+          <Text className="text-white text-2xl font-bold">Markets</Text>
+          <View className="flex-row items-center">
+            <View className={`w-3 h-3 rounded-full mr-2 ${isMarketOpen ? 'bg-green-500' : 'bg-red-500'}`} />
+            <Text className="text-gray-400">
+              Market {isMarketOpen ? 'Open' : 'Closed'}
             </Text>
           </View>
         </View>
 
-        {/* Search Bar */}
-        <View className="flex-row items-center bg-gray-100 rounded-lg px-3 py-2 mb-4">
-          <Search size={20} color="#9ca3af" />
-          <TextInput
-            className="flex-1 ml-3 text-gray-900"
-            placeholder="Search stocks, sectors..."
-            value={searchQuery}
-            onChangeText={setSearchQuery}
-          />
-        </View>
-
-        {/* Sector Tabs */}
-        <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-          <View className="flex-row space-x-2">
-            {sectorTabs.map((sector) => (
-              <TouchableOpacity
-                key={sector}
-                onPress={() => setSelectedSector(sector)}
-                className={`px-4 py-2 rounded-full ${
-                  selectedSector === sector
-                    ? 'bg-blue-500'
-                    : 'bg-gray-200'
-                }`}
-              >
-                <Text className={`font-medium ${
-                  selectedSector === sector
-                    ? 'text-white'
-                    : 'text-gray-700'
-                }`}>
-                  {sector}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-        </ScrollView>
+        {/* Search */}
+        <TextInput
+          value={searchQuery}
+          onChangeText={setSearchQuery}
+          placeholder="Search stocks, indices..."
+          placeholderTextColor="#6B7280"
+          className="bg-gray-800 text-white p-3 rounded-lg"
+        />
       </View>
 
-      <ScrollView className="flex-1 px-4 py-4">
-        {/* Indices */}
-        {selectedSector === 'All' && (
-          <View className="mb-6">
-            <Text className="text-lg font-bold text-gray-900 mb-3">Market Indices</Text>
-            <View className="flex-row justify-between">
-              {indices.map((index) => (
-                <View key={index.symbol} className="flex-1 bg-white rounded-xl p-4 mx-1 shadow-sm">
-                  <Text className="text-sm font-medium text-gray-600 mb-1">{index.symbol}</Text>
-                  <Text className="text-lg font-bold text-gray-900 mb-1">
-                    {index.price.toFixed(2)}
-                  </Text>
-                  <View className="flex-row items-center">
-                    {index.change >= 0 ? (
-                      <TrendingUp size={12} color="#16a34a" />
-                    ) : (
-                      <TrendingDown size={12} color="#dc2626" />
-                    )}
-                    <Text className={`text-xs font-medium ml-1 ${
-                      index.change >= 0 ? 'text-green-600' : 'text-red-600'
-                    }`}>
-                      {index.changePercent.toFixed(2)}%
-                    </Text>
-                  </View>
+      {/* Sector Tabs */}
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        className="p-4"
+      >
+        {sectors.map((sector) => (
+          <TouchableOpacity
+            key={sector}
+            onPress={() => setSelectedSector(sector)}
+            className={`px-4 py-2 rounded-lg mr-2 ${
+              selectedSector === sector ? 'bg-blue-600' : 'bg-gray-700'
+            }`}
+          >
+            <Text className="text-white font-medium">{sector}</Text>
+          </TouchableOpacity>
+        ))}
+      </ScrollView>
+
+      {/* Market Data */}
+      <ScrollView className="flex-1">
+        {filteredData.map((stock) => (
+          <View key={stock.symbol}>
+            {/* Stock Card */}
+            <TouchableOpacity
+              onPress={() => handleStockPress(stock)}
+              className="bg-gray-800 mx-4 mb-2 p-4 rounded-lg"
+            >
+              <View className="flex-row items-center justify-between">
+                <View className="flex-1">
+                  <Text className="text-white font-bold text-lg">{stock.symbol}</Text>
+                  <Text className="text-gray-400 text-sm">{stock.name}</Text>
+                  <Text className="text-gray-500 text-xs">{stock.sector}</Text>
                 </View>
-              ))}
+                
+                <View className="items-end">
+                  <Text className="text-white font-bold text-xl">
+                    ₹{stock.price.toFixed(2)}
+                  </Text>
+                  <Text className={`text-sm font-medium ${getChangeColor(stock.change)}`}>
+                    {stock.change > 0 ? '+' : ''}₹{stock.change.toFixed(2)} ({stock.changePercent.toFixed(2)}%)
+                  </Text>
+                </View>
+              </View>
+
+              {/* Action Buttons */}
+              <View className="flex-row justify-between mt-3 pt-3 border-t border-gray-700">
+                <TouchableOpacity
+                  onPress={() => handleTrade(stock, 'BUY')}
+                  className="bg-green-600 px-4 py-2 rounded-lg flex-1 mr-1"
+                  disabled={!isMarketOpen}
+                >
+                  <Text className="text-white font-bold text-center">BUY</Text>
+                </TouchableOpacity>
+                
+                <TouchableOpacity
+                  onPress={() => handleTrade(stock, 'SELL')}
+                  className="bg-red-600 px-4 py-2 rounded-lg flex-1 mx-1"
+                  disabled={!isMarketOpen}
+                >
+                  <Text className="text-white font-bold text-center">SELL</Text>
+                </TouchableOpacity>
+                
+                <TouchableOpacity
+                  onPress={() => handleShowChart(stock)}
+                  className="bg-blue-600 px-4 py-2 rounded-lg flex-1 mx-1"
+                >
+                  <Text className="text-white font-bold text-center">CHART</Text>
+                </TouchableOpacity>
+                
+                <TouchableOpacity
+                  onPress={() => addToWatchlist(stock.symbol)}
+                  className="bg-gray-600 px-4 py-2 rounded-lg flex-1 ml-1"
+                >
+                  <Text className="text-white font-bold text-center">+</Text>
+                </TouchableOpacity>
+              </View>
+
+              {/* Option Chain Button for Indices */}
+              {stock.type === 'INDEX' && (
+                <TouchableOpacity
+                  onPress={() => handleShowOptionChain(stock)}
+                  className="bg-purple-600 p-2 rounded-lg mt-2"
+                >
+                  <Text className="text-white font-bold text-center">View Option Chain</Text>
+                </TouchableOpacity>
+              )}
+            </TouchableOpacity>
+
+            {/* Fundamental Stats */}
+            {selectedStock?.symbol === stock.symbol && (
+              <View className="mx-4 mb-4">
+                <FundamentalStatsViewer
+                  symbol={stock.symbol}
+                  marketData={stock}
+                />
+              </View>
+            )}
+          </View>
+        ))}
+      </ScrollView>
+
+      {/* Chart Modal */}
+      <Modal
+        visible={showChart}
+        animationType="slide"
+        onRequestClose={() => setShowChart(false)}
+      >
+        {selectedStock && (
+          <AdvancedChart
+            symbol={selectedStock.symbol}
+            onClose={() => setShowChart(false)}
+          />
+        )}
+      </Modal>
+
+      {/* Option Chain Modal */}
+      <Modal
+        visible={showOptionChain}
+        animationType="slide"
+        onRequestClose={() => setShowOptionChain(false)}
+      >
+        <View className="flex-1 bg-gray-900">
+          <View className="flex-row items-center justify-between p-4 border-b border-gray-700">
+            <Text className="text-white text-xl font-bold">
+              {selectedStock?.symbol} Option Chain
+            </Text>
+            <TouchableOpacity
+              onPress={() => setShowOptionChain(false)}
+              className="bg-gray-700 px-4 py-2 rounded-lg"
+            >
+              <Text className="text-white">Close</Text>
+            </TouchableOpacity>
+          </View>
+
+          <ScrollView className="flex-1">
+            {/* Option Chain Header */}
+            <View className="bg-gray-800 p-4 flex-row">
+              <Text className="text-white font-bold flex-1 text-center">CALL</Text>
+              <Text className="text-white font-bold w-20 text-center">STRIKE</Text>
+              <Text className="text-white font-bold flex-1 text-center">PUT</Text>
+            </View>
+
+            {optionChainData.map((option, index) => (
+              <View key={index} className="bg-gray-800 border-b border-gray-700 p-2 flex-row">
+                {/* Call Side */}
+                <View className="flex-1 pr-2">
+                  <Text className="text-green-500 font-bold">₹{option.callLTP.toFixed(2)}</Text>
+                  <Text className="text-gray-400 text-xs">OI: {option.callOI.toLocaleString()}</Text>
+                  <Text className="text-gray-400 text-xs">Vol: {option.callVolume.toLocaleString()}</Text>
+                </View>
+
+                {/* Strike Price */}
+                <View className="w-20 items-center justify-center">
+                  <Text className="text-white font-bold">{option.strikePrice}</Text>
+                </View>
+
+                {/* Put Side */}
+                <View className="flex-1 pl-2">
+                  <Text className="text-red-500 font-bold">₹{option.putLTP.toFixed(2)}</Text>
+                  <Text className="text-gray-400 text-xs">OI: {option.putOI.toLocaleString()}</Text>
+                  <Text className="text-gray-400 text-xs">Vol: {option.putVolume.toLocaleString()}</Text>
+                </View>
+              </View>
+            ))}
+          </ScrollView>
+        </View>
+      </Modal>
+
+      {/* Trade Modal */}
+      <Modal
+        visible={showTradeModal}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setShowTradeModal(false)}
+      >
+        <View className="flex-1 bg-black bg-opacity-50 justify-center items-center">
+          <View className="bg-gray-800 rounded-lg p-6 w-80">
+            <Text className="text-white text-xl font-bold mb-4">
+              {tradeType} {selectedStock?.symbol}
+            </Text>
+
+            <View className="mb-4">
+              <Text className="text-gray-400 mb-2">Current Price</Text>
+              <Text className="text-white text-2xl font-bold">
+                ₹{selectedStock?.price.toFixed(2)}
+              </Text>
+            </View>
+
+            <View className="mb-4">
+              <Text className="text-gray-400 mb-2">Quantity</Text>
+              <TextInput
+                value={tradeQuantity}
+                onChangeText={setTradeQuantity}
+                keyboardType="numeric"
+                className="bg-gray-700 text-white p-3 rounded-lg"
+              />
+            </View>
+
+            <View className="mb-4">
+              <Text className="text-gray-400 mb-2">Total Amount</Text>
+              <Text className="text-white text-lg">
+                ₹{((selectedStock?.price || 0) * parseInt(tradeQuantity || '0')).toFixed(2)}
+              </Text>
+              <Text className="text-gray-400 text-sm">+ ₹20 brokerage</Text>
+            </View>
+
+            <View className="mb-4">
+              <Text className="text-gray-400 mb-2">Available Balance</Text>
+              <Text className="text-white text-lg">₹{userBalance.toFixed(2)}</Text>
+            </View>
+
+            <View className="flex-row space-x-3">
+              <TouchableOpacity
+                onPress={() => setShowTradeModal(false)}
+                className="bg-gray-600 px-6 py-3 rounded-lg flex-1"
+              >
+                <Text className="text-white font-bold text-center">Cancel</Text>
+              </TouchableOpacity>
+              
+              <TouchableOpacity
+                onPress={executeTrade}
+                className={`px-6 py-3 rounded-lg flex-1 ${
+                  tradeType === 'BUY' ? 'bg-green-600' : 'bg-red-600'
+                }`}
+              >
+                <Text className="text-white font-bold text-center">{tradeType}</Text>
+              </TouchableOpacity>
             </View>
           </View>
-        )}
-
-        {/* Stocks */}
-        <View className="mb-6">
-          <Text className="text-lg font-bold text-gray-900 mb-3">
-            {selectedSector === 'All' ? 'All Stocks' : `${selectedSector} Stocks`}
-            <Text className="text-sm text-gray-500 font-normal"> ({filteredStocks.length})</Text>
-          </Text>
-          
-          {filteredStocks.map(renderStockItem)}
         </View>
-      </ScrollView>
+      </Modal>
     </View>
-  )
+  );
 }

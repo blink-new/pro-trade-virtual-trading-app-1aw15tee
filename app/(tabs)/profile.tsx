@@ -1,52 +1,164 @@
-import React, { useState, useEffect } from 'react'
-import { View, Text, ScrollView, TouchableOpacity, Switch, Alert } from 'react-native'
-import { User, Settings, Gift, Trophy, DollarSign, Moon, Sun, Bell, LogOut, Share2 } from 'lucide-react-native'
-import blink from '@/src/blink/client'
+import React, { useState, useEffect } from 'react';
+import { View, Text, ScrollView, TouchableOpacity, Switch, Alert, Modal } from 'react-native';
+import { supabase } from '../../src/lib/supabase';
+import { tradingService } from '../../src/services/tradingService';
+import ReferralRewardSystem from '../../components/ReferralRewardSystem';
 
 export default function ProfileScreen() {
-  const [user, setUser] = useState<any>(null)
-  const [userStats] = useState({
-    totalTrades: 15,
-    totalPnL: 2500.75,
-    winRate: 73.3,
-    bestTrade: 850.25,
-    worstTrade: -125.50,
-    totalBrokerage: 300.00,
-    netPnL: 2200.75,
-    rank: 42,
-    leaderboardPoints: 1250
-  })
-  
+  const [user, setUser] = useState<any>(null);
+  const [userStats, setUserStats] = useState({
+    totalTrades: 0,
+    winRate: 0,
+    totalPnL: 0,
+    bestTrade: 0,
+    worstTrade: 0,
+    totalBrokerage: 0,
+    rank: 0
+  });
   const [settings, setSettings] = useState({
-    darkMode: false,
-    notifications: true,
-    soundEnabled: true,
+    darkMode: true,
+    notificationsEnabled: true,
     brokerageSimulation: true
-  })
-  
-  const [loading, setLoading] = useState(true)
+  });
+  const [showReferralModal, setShowReferralModal] = useState(false);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    loadProfileData()
-  }, [])
+    loadUserData();
+  }, []);
 
-  const loadProfileData = async () => {
+  const loadUserData = async () => {
     try {
-      const userData = await blink.auth.me()
-      setUser(userData)
+      setLoading(true);
+      
+      // Get authenticated user
+      const { data: { user: authUser } } = await supabase.auth.getUser();
+      if (!authUser) return;
+
+      // Get user profile
+      const { data: userData, error: userError } = await supabase
+        .from('users')
+        .select('*')
+        .eq('id', authUser.id)
+        .single();
+
+      if (userError) throw userError;
+      setUser(userData);
+
+      // Get user settings
+      const { data: settingsData } = await supabase
+        .from('user_settings')
+        .select('*')
+        .eq('user_id', authUser.id)
+        .single();
+
+      if (settingsData) {
+        setSettings({
+          darkMode: settingsData.dark_mode,
+          notificationsEnabled: settingsData.notifications_enabled,
+          brokerageSimulation: settingsData.brokerage_simulation
+        });
+      }
+
+      // Load user statistics
+      await loadUserStats(authUser.id);
+
     } catch (error) {
-      console.error('Error loading profile data:', error)
+      console.error('Error loading user data:', error);
     } finally {
-      setLoading(false)
+      setLoading(false);
     }
-  }
+  };
 
-  const updateSetting = (key: string, value: boolean) => {
-    setSettings(prev => ({ ...prev, [key]: value }))
-    // In a real app, this would update the database
-  }
+  const loadUserStats = async (userId: string) => {
+    try {
+      // Get trade statistics
+      const { data: trades } = await supabase
+        .from('trades')
+        .select('*')
+        .eq('user_id', userId);
 
-  const handleLogout = () => {
+      const { data: positions } = await supabase
+        .from('positions')
+        .select('pnl')
+        .eq('user_id', userId);
+
+      if (trades) {
+        const totalTrades = trades.length;
+        const closedTrades = trades.filter(t => t.status === 'CLOSED');
+        const winningTrades = closedTrades.filter(t => (t.pnl || 0) > 0);
+        const winRate = closedTrades.length > 0 ? (winningTrades.length / closedTrades.length) * 100 : 0;
+        
+        const totalPnL = [...closedTrades, ...(positions || [])].reduce((sum, item) => sum + (item.pnl || 0), 0);
+        const totalBrokerage = trades.reduce((sum, trade) => sum + (trade.brokerage || 0), 0);
+        
+        const pnlValues = [...closedTrades, ...(positions || [])].map(item => item.pnl || 0).filter(pnl => pnl !== 0);
+        const bestTrade = pnlValues.length > 0 ? Math.max(...pnlValues) : 0;
+        const worstTrade = pnlValues.length > 0 ? Math.min(...pnlValues) : 0;
+
+        // Get user rank (mock calculation)
+        const { data: allUsers } = await supabase
+          .from('users')
+          .select('total_pnl')
+          .order('total_pnl', { ascending: false });
+
+        const rank = allUsers ? allUsers.findIndex(u => u.total_pnl <= totalPnL) + 1 : 1;
+
+        setUserStats({
+          totalTrades,
+          winRate,
+          totalPnL,
+          bestTrade,
+          worstTrade,
+          totalBrokerage,
+          rank
+        });
+      }
+    } catch (error) {
+      console.error('Error loading user stats:', error);
+    }
+  };
+
+  const updateSetting = async (key: keyof typeof settings, value: boolean) => {
+    try {
+      setSettings(prev => ({ ...prev, [key]: value }));
+
+      if (!user) return;
+
+      // Update in database
+      const updateData: any = {};
+      if (key === 'darkMode') updateData.dark_mode = value;
+      if (key === 'notificationsEnabled') updateData.notifications_enabled = value;
+      if (key === 'brokerageSimulation') updateData.brokerage_simulation = value;
+
+      const { error } = await supabase
+        .from('user_settings')
+        .upsert({
+          user_id: user.id,
+          ...updateData,
+          updated_at: new Date().toISOString()
+        });
+
+      if (error) throw error;
+
+      if (key === 'brokerageSimulation') {
+        Alert.alert(
+          'Setting Updated',
+          value 
+            ? 'Brokerage simulation is now enabled. ₹20 will be charged per trade.'
+            : 'Brokerage simulation is now disabled. No charges per trade.'
+        );
+      }
+
+    } catch (error) {
+      console.error('Error updating setting:', error);
+      // Revert the change
+      setSettings(prev => ({ ...prev, [key]: !value }));
+      Alert.alert('Error', 'Failed to update setting');
+    }
+  };
+
+  const handleLogout = async () => {
     Alert.alert(
       'Logout',
       'Are you sure you want to logout?',
@@ -55,229 +167,226 @@ export default function ProfileScreen() {
         {
           text: 'Logout',
           style: 'destructive',
-          onPress: () => {
-            blink.auth.logout()
+          onPress: async () => {
+            try {
+              await supabase.auth.signOut();
+              // Navigation will be handled by the auth state change
+            } catch (error) {
+              Alert.alert('Error', 'Failed to logout');
+            }
           }
         }
       ]
-    )
-  }
+    );
+  };
 
-  const shareApp = () => {
-    Alert.alert(
-      'Share PRO TRADE',
-      '🚀 Check out PRO TRADE - Virtual Stock Trading App!\n\n' +
-      '✅ Learn stock trading risk-free\n' +
-      '✅ Real-time market data\n' +
-      '✅ Virtual portfolio tracking\n' +
-      '✅ Practice with ₹1,00,000 virtual balance\n\n' +
-      'Perfect for beginners and experienced traders! 📈'
-    )
-  }
+  const formatCurrency = (amount: number) => {
+    return `₹${amount.toFixed(2)}`;
+  };
+
+  const getPerformanceColor = (value: number) => {
+    if (value > 0) return 'text-green-500';
+    if (value < 0) return 'text-red-500';
+    return 'text-gray-400';
+  };
 
   if (loading) {
     return (
-      <View className="flex-1 bg-gray-50 justify-center items-center">
-        <Text className="text-lg font-semibold text-blue-600">Loading Profile...</Text>
+      <View className="flex-1 bg-gray-900 justify-center items-center">
+        <Text className="text-white text-lg">Loading profile...</Text>
       </View>
-    )
+    );
+  }
+
+  if (!user) {
+    return (
+      <View className="flex-1 bg-gray-900 justify-center items-center">
+        <Text className="text-white text-lg">Please login to view profile</Text>
+      </View>
+    );
   }
 
   return (
-    <View className="flex-1 bg-gray-50">
-      {/* Header */}
-      <View className="bg-white px-4 pt-12 pb-6 border-b border-gray-200">
-        <View className="flex-row items-center mb-4">
-          <View className="w-16 h-16 bg-gradient-to-br from-blue-500 to-purple-500 rounded-full items-center justify-center">
-            <User size={32} color="white" />
-          </View>
-          <View className="ml-4 flex-1">
-            <Text className="text-2xl font-bold text-gray-900">
-              {user?.display_name || user?.email?.split('@')[0] || 'Trader'}
-            </Text>
-            <Text className="text-gray-500">{user?.email}</Text>
-            <View className="flex-row items-center mt-1">
-              <Trophy size={16} color="#f59e0b" />
-              <Text className="text-yellow-600 font-medium ml-1">Rank #{userStats.rank}</Text>
-            </View>
-          </View>
-        </View>
-
-        {/* Quick Stats */}
-        <View className="flex-row justify-between">
-          <View className="flex-1 items-center">
-            <Text className="text-2xl font-bold text-blue-600">{userStats.totalTrades}</Text>
-            <Text className="text-gray-500 text-sm">Total Trades</Text>
-          </View>
-          <View className="flex-1 items-center">
-            <Text className={`text-2xl font-bold ${
-              userStats.netPnL >= 0 ? 'text-green-600' : 'text-red-600'
-            }`}>
-              ₹{userStats.netPnL.toFixed(0)}
-            </Text>
-            <Text className="text-gray-500 text-sm">Net P&L</Text>
-          </View>
-          <View className="flex-1 items-center">
-            <Text className="text-2xl font-bold text-purple-600">{userStats.winRate.toFixed(1)}%</Text>
-            <Text className="text-gray-500 text-sm">Win Rate</Text>
-          </View>
-        </View>
-      </View>
-
-      <ScrollView className="flex-1 px-4 py-4">
-        {/* Performance Stats */}
-        <View className="bg-white rounded-xl p-4 mb-4 shadow-sm">
-          <Text className="text-lg font-bold text-gray-900 mb-4">Performance Analytics</Text>
+    <View className="flex-1 bg-gray-900">
+      <ScrollView className="flex-1">
+        {/* Header */}
+        <View className="p-4 border-b border-gray-700">
+          <Text className="text-white text-2xl font-bold mb-4">Profile</Text>
           
-          <View className="space-y-4">
-            <View className="flex-row justify-between items-center">
-              <Text className="text-gray-700">Total P&L</Text>
-              <Text className={`text-lg font-bold ${
-                userStats.totalPnL >= 0 ? 'text-green-600' : 'text-red-600'
-              }`}>
-                ₹{userStats.totalPnL.toFixed(2)}
+          {/* User Info */}
+          <View className="bg-gray-800 rounded-lg p-4 mb-4">
+            <View className="items-center mb-4">
+              <View className="w-20 h-20 bg-blue-600 rounded-full items-center justify-center mb-3">
+                <Text className="text-white text-2xl font-bold">
+                  {user.display_name?.charAt(0) || user.email.charAt(0).toUpperCase()}
+                </Text>
+              </View>
+              <Text className="text-white text-xl font-bold">
+                {user.display_name || 'Trader'}
               </Text>
+              <Text className="text-gray-400">{user.email}</Text>
+              <Text className="text-blue-400 font-medium">Rank #{userStats.rank}</Text>
             </View>
 
-            <View className="flex-row justify-between items-center">
-              <Text className="text-gray-700">Total Brokerage Paid</Text>
-              <Text className="text-lg font-bold text-red-600">₹{userStats.totalBrokerage.toFixed(2)}</Text>
-            </View>
-
-            <View className="flex-row justify-between items-center">
-              <Text className="text-gray-700">Best Trade</Text>
-              <Text className="text-lg font-bold text-green-600">₹{userStats.bestTrade.toFixed(2)}</Text>
-            </View>
-
-            <View className="flex-row justify-between items-center">
-              <Text className="text-gray-700">Worst Trade</Text>
-              <Text className="text-lg font-bold text-red-600">₹{userStats.worstTrade.toFixed(2)}</Text>
-            </View>
-
-            <View className="flex-row justify-between items-center">
-              <Text className="text-gray-700">Leaderboard Points</Text>
-              <Text className="text-lg font-bold text-yellow-600">{userStats.leaderboardPoints}</Text>
-            </View>
-          </View>
-        </View>
-
-        {/* Referral Program */}
-        <TouchableOpacity className="bg-gradient-to-r from-purple-500 to-blue-500 rounded-xl p-4 mb-4 shadow-sm">
-          <View className="flex-row items-center justify-between">
-            <View className="flex-row items-center">
-              <Gift size={24} color="white" />
-              <View className="ml-3">
-                <Text className="text-white font-bold text-lg">Referral Program</Text>
-                <Text className="text-white opacity-90">Invite friends and earn rewards</Text>
+            <View className="flex-row justify-between">
+              <View className="items-center">
+                <Text className="text-gray-400 text-sm">Virtual Balance</Text>
+                <Text className="text-white text-lg font-bold">
+                  {formatCurrency(user.virtual_balance)}
+                </Text>
+              </View>
+              <View className="items-center">
+                <Text className="text-gray-400 text-sm">Total P&L</Text>
+                <Text className={`text-lg font-bold ${getPerformanceColor(userStats.totalPnL)}`}>
+                  {userStats.totalPnL > 0 ? '+' : ''}{formatCurrency(userStats.totalPnL)}
+                </Text>
               </View>
             </View>
-            <View className="bg-white bg-opacity-20 rounded-full p-2">
-              <Text className="text-white font-bold">→</Text>
+          </View>
+        </View>
+
+        {/* Performance Analytics */}
+        <View className="p-4">
+          <Text className="text-white text-xl font-bold mb-4">Performance Analytics</Text>
+          
+          <View className="bg-gray-800 rounded-lg p-4 mb-4">
+            <View className="flex-row justify-between mb-4">
+              <View className="items-center flex-1">
+                <Text className="text-gray-400 text-sm">Total Trades</Text>
+                <Text className="text-white text-2xl font-bold">{userStats.totalTrades}</Text>
+              </View>
+              <View className="items-center flex-1">
+                <Text className="text-gray-400 text-sm">Win Rate</Text>
+                <Text className="text-white text-2xl font-bold">{userStats.winRate.toFixed(1)}%</Text>
+              </View>
+            </View>
+
+            <View className="flex-row justify-between mb-4">
+              <View className="items-center flex-1">
+                <Text className="text-gray-400 text-sm">Best Trade</Text>
+                <Text className="text-green-500 text-lg font-bold">
+                  +{formatCurrency(userStats.bestTrade)}
+                </Text>
+              </View>
+              <View className="items-center flex-1">
+                <Text className="text-gray-400 text-sm">Worst Trade</Text>
+                <Text className="text-red-500 text-lg font-bold">
+                  {formatCurrency(userStats.worstTrade)}
+                </Text>
+              </View>
+            </View>
+
+            <View className="flex-row justify-between">
+              <View className="items-center flex-1">
+                <Text className="text-gray-400 text-sm">Net P&L</Text>
+                <Text className={`text-lg font-bold ${getPerformanceColor(userStats.totalPnL - userStats.totalBrokerage)}`}>
+                  {formatCurrency(userStats.totalPnL - userStats.totalBrokerage)}
+                </Text>
+              </View>
+              <View className="items-center flex-1">
+                <Text className="text-gray-400 text-sm">Total Brokerage</Text>
+                <Text className="text-red-400 text-lg font-bold">
+                  {formatCurrency(userStats.totalBrokerage)}
+                </Text>
+              </View>
             </View>
           </View>
-        </TouchableOpacity>
 
-        {/* Settings */}
-        <View className="bg-white rounded-xl p-4 mb-4 shadow-sm">
-          <Text className="text-lg font-bold text-gray-900 mb-4">Settings</Text>
+          {/* Referral Section */}
+          <TouchableOpacity
+            onPress={() => setShowReferralModal(true)}
+            className="bg-gradient-to-r from-purple-600 to-blue-600 rounded-lg p-4 mb-4"
+          >
+            <View className="flex-row items-center justify-between">
+              <View>
+                <Text className="text-white text-lg font-bold">🎁 Refer & Earn</Text>
+                <Text className="text-gray-200 text-sm">
+                  Invite friends and earn ₹1,000 each!
+                </Text>
+              </View>
+              <Text className="text-white text-2xl">→</Text>
+            </View>
+          </TouchableOpacity>
+
+          {/* Settings */}
+          <Text className="text-white text-xl font-bold mb-4">Settings</Text>
           
-          <View className="space-y-4">
-            {/* Dark Mode */}
-            <View className="flex-row justify-between items-center">
-              <View className="flex-row items-center">
-                {settings.darkMode ? (
-                  <Moon size={20} color="#6b7280" />
-                ) : (
-                  <Sun size={20} color="#6b7280" />
-                )}
-                <Text className="text-gray-700 ml-3">Dark Mode</Text>
+          <View className="bg-gray-800 rounded-lg p-4 mb-4">
+            <View className="flex-row items-center justify-between py-3 border-b border-gray-700">
+              <View>
+                <Text className="text-white font-medium">Dark Mode</Text>
+                <Text className="text-gray-400 text-sm">Use dark theme</Text>
               </View>
               <Switch
                 value={settings.darkMode}
                 onValueChange={(value) => updateSetting('darkMode', value)}
-                trackColor={{ false: '#e5e7eb', true: '#3b82f6' }}
-                thumbColor={settings.darkMode ? '#ffffff' : '#f3f4f6'}
+                trackColor={{ false: '#374151', true: '#3B82F6' }}
+                thumbColor={settings.darkMode ? '#FFFFFF' : '#9CA3AF'}
               />
             </View>
 
-            {/* Notifications */}
-            <View className="flex-row justify-between items-center">
-              <View className="flex-row items-center">
-                <Bell size={20} color="#6b7280" />
-                <Text className="text-gray-700 ml-3">Push Notifications</Text>
+            <View className="flex-row items-center justify-between py-3 border-b border-gray-700">
+              <View>
+                <Text className="text-white font-medium">Notifications</Text>
+                <Text className="text-gray-400 text-sm">Receive trade alerts and updates</Text>
               </View>
               <Switch
-                value={settings.notifications}
-                onValueChange={(value) => updateSetting('notifications', value)}
-                trackColor={{ false: '#e5e7eb', true: '#3b82f6' }}
-                thumbColor={settings.notifications ? '#ffffff' : '#f3f4f6'}
+                value={settings.notificationsEnabled}
+                onValueChange={(value) => updateSetting('notificationsEnabled', value)}
+                trackColor={{ false: '#374151', true: '#3B82F6' }}
+                thumbColor={settings.notificationsEnabled ? '#FFFFFF' : '#9CA3AF'}
               />
             </View>
 
-            {/* Sound */}
-            <View className="flex-row justify-between items-center">
-              <View className="flex-row items-center">
-                <Settings size={20} color="#6b7280" />
-                <Text className="text-gray-700 ml-3">Sound Effects</Text>
-              </View>
-              <Switch
-                value={settings.soundEnabled}
-                onValueChange={(value) => updateSetting('soundEnabled', value)}
-                trackColor={{ false: '#e5e7eb', true: '#3b82f6' }}
-                thumbColor={settings.soundEnabled ? '#ffffff' : '#f3f4f6'}
-              />
-            </View>
-
-            {/* Brokerage Simulation */}
-            <View className="flex-row justify-between items-center">
-              <View className="flex-row items-center">
-                <DollarSign size={20} color="#6b7280" />
-                <View className="ml-3 flex-1">
-                  <Text className="text-gray-700">Brokerage Simulation</Text>
-                  <Text className="text-xs text-gray-500">₹20 per trade for realistic experience</Text>
-                </View>
+            <View className="flex-row items-center justify-between py-3">
+              <View>
+                <Text className="text-white font-medium">Brokerage Simulation</Text>
+                <Text className="text-gray-400 text-sm">Charge ₹20 per trade for realistic experience</Text>
               </View>
               <Switch
                 value={settings.brokerageSimulation}
                 onValueChange={(value) => updateSetting('brokerageSimulation', value)}
-                trackColor={{ false: '#e5e7eb', true: '#3b82f6' }}
-                thumbColor={settings.brokerageSimulation ? '#ffffff' : '#f3f4f6'}
+                trackColor={{ false: '#374151', true: '#3B82F6' }}
+                thumbColor={settings.brokerageSimulation ? '#FFFFFF' : '#9CA3AF'}
               />
             </View>
           </View>
-        </View>
 
-        {/* Actions */}
-        <View className="bg-white rounded-xl p-4 mb-4 shadow-sm">
-          <Text className="text-lg font-bold text-gray-900 mb-4">Actions</Text>
-          
-          <TouchableOpacity
-            onPress={shareApp}
-            className="flex-row items-center py-3 border-b border-gray-100"
-          >
-            <Share2 size={20} color="#3b82f6" />
-            <Text className="text-blue-600 font-medium ml-3">Share App</Text>
-          </TouchableOpacity>
-
+          {/* Logout Button */}
           <TouchableOpacity
             onPress={handleLogout}
-            className="flex-row items-center py-3"
+            className="bg-red-600 rounded-lg p-4"
           >
-            <LogOut size={20} color="#dc2626" />
-            <Text className="text-red-600 font-medium ml-3">Logout</Text>
+            <Text className="text-white font-bold text-center text-lg">Logout</Text>
           </TouchableOpacity>
         </View>
-
-        {/* App Info */}
-        <View className="bg-white rounded-xl p-4 mb-6 shadow-sm">
-          <Text className="text-lg font-bold text-gray-900 mb-2">About PRO TRADE</Text>
-          <Text className="text-gray-600 text-sm leading-5">
-            PRO TRADE is a virtual stock trading platform designed to help you learn and practice trading 
-            without any financial risk. All trades are simulated using real-time market data.
-          </Text>
-          <Text className="text-gray-500 text-xs mt-3">Version 1.0.0</Text>
-        </View>
       </ScrollView>
+
+      {/* Referral Modal */}
+      <Modal
+        visible={showReferralModal}
+        animationType="slide"
+        onRequestClose={() => setShowReferralModal(false)}
+      >
+        <View className="flex-1 bg-gray-900">
+          <View className="flex-row items-center justify-between p-4 border-b border-gray-700">
+            <Text className="text-white text-xl font-bold">Refer & Earn</Text>
+            <TouchableOpacity
+              onPress={() => setShowReferralModal(false)}
+              className="bg-gray-700 px-4 py-2 rounded-lg"
+            >
+              <Text className="text-white">Close</Text>
+            </TouchableOpacity>
+          </View>
+          
+          <ScrollView className="flex-1 p-4">
+            <ReferralRewardSystem
+              userId={user.id}
+              userEmail={user.email}
+            />
+          </ScrollView>
+        </View>
+      </Modal>
     </View>
-  )
+  );
 }
