@@ -1,0 +1,49 @@
+/* Tailwind CSS imports for React Native */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Custom styles */
+.text-primary {
+  color: #007AFF;
+}
+
+.text-accent {
+  color: #34C759;
+}
+
+.text-danger {
+  color: #FF3B30;
+}
+
+.bg-primary {
+  background-color: #007AFF;
+}
+
+.bg-accent {
+  background-color: #34C759;
+}
+
+.bg-danger {
+  background-color: #FF3B30;
+}
+
+.bg-card {
+  background-color: #FFFFFF;
+}
+
+.text-text {
+  color: #000000;
+}
+
+.text-textSecondary {
+  color: #8E8E93;
+}
+
+.font-sf-pro {
+  font-family: 'SF Pro Display', system-ui, -apple-system, sans-serif;
+}
+
+.font-sf-text {
+  font-family: 'SF Pro Text', system-ui, -apple-system, sans-serif;
+}
